@@ -1,5 +1,38 @@
 #include "cmu_tcp.h"
 
+int fdu_hand_shake(cmu_socket_t *sock, int flag) {
+    if (flag == TCP_INITATOR) {
+        puts("client  send syn\n");
+        send_packet_with_seq_ack_flags(sock, CLIENT_ISN, 0, SYN_FLAG_MASK);
+    } else if (flag == TCP_LISTENER) {
+
+        while (sock->tcp_state != SYN_RCVD) {
+            check_for_data(sock, TIMEOUT);
+        }
+        puts("server send syn and ack\n");
+        sock->window.last_ack_received += 1;
+        send_packet_with_seq_ack_flags(sock, SERVER_ISN, CLIENT_ISN + 1, SYN_FLAG_MASK | ACK_FLAG_MASK);
+    } else {
+        fprintf(stderr, "unk flag");
+    }
+    return 0;
+}
+
+
+void fdu_hand_wave(cmu_socket_t *sock) {
+
+    while (pthread_mutex_lock(&(sock->send_lock)) != 0);
+    //如果缓冲区还有数据 解除写锁 线程休眠
+    while (sock->sending_len != 0)
+        pthread_cond_wait(&(sock->terminate_cond), &(sock->send_lock));
+
+    pthread_mutex_unlock(&(sock->send_lock));
+    //唤醒后可以向对方发送
+    sock->tcp_state = FIN_SENT;
+    send_packet_with_seq_ack_flags(sock, sock->window.last_ack_received + 1, 0, FIN_FLAG_MASK);
+}
+
+
 /*
  * Param: dst - The structure where socket information will be stored
  * Param: flag - A flag indicating the type of socket(Listener / Initiator)
@@ -13,17 +46,18 @@
  *  and the value returned will provide error information. 
  *
  */
-int cmu_socket(cmu_socket_t * dst, int flag, int port, char * serverIP){
+int cmu_socket(cmu_socket_t* dst, int flag, int port, char* serverIP) {
   int sockfd, optval;
   socklen_t len;
   struct sockaddr_in conn, my_addr;
   len = sizeof(my_addr);
 
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sockfd < 0){
-    perror("ERROR opening socket");
+  if (sockfd < 0) {
+    perror("[ERROR] opening socket");
     return EXIT_ERROR;
   }
+
   dst->their_port = port;
   dst->socket = sockfd;
   dst->received_buf = NULL;
@@ -36,19 +70,36 @@ int cmu_socket(cmu_socket_t * dst, int flag, int port, char * serverIP){
   dst->dying = FALSE;
   pthread_mutex_init(&(dst->death_lock), NULL);
   dst->window.last_ack_received = 0;
-  dst->window.last_seq_received = 0;
+  dst->window.expected_rev_seq = 0;
+  dst->edit_time_flag = FALSE;
+  pthread_mutex_init(&(dst->time_lock), NULL);
   pthread_mutex_init(&(dst->window.ack_lock), NULL);
 
-  if(pthread_cond_init(&dst->wait_cond, NULL) != 0){
-    perror("ERROR condition variable not set\n");
+  dst->cwnd = WINDOW_INITIAL_WINDOW_SIZE * MSS;
+  dst->rwnd = WINDOW_INITIAL_WINDOW_SIZE * MSS;
+  dst->ssthresh = WINDOW_INITIAL_SSTHRESH * MSS;
+  dst->esti_rtt = WINDOW_INITIAL_RTT * 1000;
+  dst->dev_rtt = 0;
+
+  dst->timeout_interval.tv_sec = 3;
+  dst->timeout_interval.tv_usec = 0;
+
+  dst->tmp_buf = NULL;
+  dst->tmp_len = 0;
+
+  dst->window.expected_rev_seq = 0;
+  dst->window.last_ack_received = 0;
+  dst->tmp_len = 0;
+
+  if(pthread_cond_init(&dst->wait_cond, NULL) != 0) {
+    perror("[ERROR] condition variable not set");
     return EXIT_ERROR;
   }
 
-
-  switch(flag){
+  switch(flag) {
     case(TCP_INITATOR):
-      if(serverIP == NULL){
-        perror("ERROR serverIP NULL");
+      if(serverIP == NULL) {
+        perror("[ERROR] serverIP NULL");
         return EXIT_ERROR;
       }
       memset(&conn, 0, sizeof(conn));          
@@ -60,14 +111,12 @@ int cmu_socket(cmu_socket_t * dst, int flag, int port, char * serverIP){
       my_addr.sin_family = AF_INET;
       my_addr.sin_addr.s_addr = htonl(INADDR_ANY);
       my_addr.sin_port = 0;
-      if (bind(sockfd, (struct sockaddr *) &my_addr, 
-        sizeof(my_addr)) < 0){
-        perror("ERROR on binding");
+      if (bind(sockfd, (struct sockaddr *) &my_addr, sizeof(my_addr)) < 0) {
+        perror("[ERROR] on binding");
         return EXIT_ERROR;
       }
-
       break;
-    
+
     case(TCP_LISTENER):
       bzero((char *) &conn, sizeof(conn));
       conn.sin_family = AF_INET;
@@ -75,26 +124,30 @@ int cmu_socket(cmu_socket_t * dst, int flag, int port, char * serverIP){
       conn.sin_port = htons((unsigned short)port);
 
       optval = 1;
-      setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, 
-           (const void *)&optval , sizeof(int));
-      if (bind(sockfd, (struct sockaddr *) &conn, 
-        sizeof(conn)) < 0){
-          perror("ERROR on binding");
+      setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(int));
+      if (bind(sockfd, (struct sockaddr *) &conn, sizeof(conn)) < 0) {
+          perror("[ERROR] on binding");
           return EXIT_ERROR;
       }
       dst->conn = conn;
       break;
 
     default:
-      perror("Unknown Flag");
+      perror("[ERROR] Unknown Flag");
       return EXIT_ERROR;
   }
-  getsockname(sockfd, (struct sockaddr *) &my_addr, &len);
+
+  getsockname(sockfd, (struct sockaddr*) &my_addr, &len);
   dst->my_port = ntohs(my_addr.sin_port);
+
+
+  dst->tcp_state = CLOSED;
+  fdu_hand_shake(dst, flag);
 
   pthread_create(&(dst->thread_id), NULL, begin_backend, (void *)dst);  
   return EXIT_SUCCESS;
 }
+
 
 /*
  * Param: sock - The socket to close.
@@ -104,25 +157,30 @@ int cmu_socket(cmu_socket_t * dst, int flag, int port, char * serverIP){
  * Return: Returns error code information on the close operation.
  *
  */
-int cmu_close(cmu_socket_t * sock){
+int cmu_close(cmu_socket_t * sock) {
   while(pthread_mutex_lock(&(sock->death_lock)) != 0);
+
   sock->dying = TRUE;
+
   pthread_mutex_unlock(&(sock->death_lock));
 
+  fdu_hand_wave(sock);
   pthread_join(sock->thread_id, NULL); 
 
-  if(sock != NULL){
+  if(sock != NULL) {
     if(sock->received_buf != NULL)
       free(sock->received_buf);
     if(sock->sending_buf != NULL)
       free(sock->sending_buf);
   }
   else{
-    perror("ERORR Null scoket\n");
+    perror("[ERORR] NULL scoket");
     return EXIT_ERROR;
   }
   return close(sock->socket);
 }
+
+
 
 /*
  * Param: sock - The socket to read data from the received buffer.
@@ -137,39 +195,43 @@ int cmu_close(cmu_socket_t * sock){
  *  in the dst buffer, and error information is returned. 
  *
  */
-int cmu_read(cmu_socket_t * sock, char* dst, int length, int flags){
+int cmu_read(cmu_socket_t * sock, char* dst, int length, int flags) {
   char* new_buf;
   int read_len = 0;
 
-  if(length < 0){
-    perror("ERROR negative length");
+  if(length < 0) {
+    perror("[ERROR] negative length");
     return EXIT_ERROR;
   }
 
-  while(pthread_mutex_lock(&(sock->recv_lock)) != 0);
+  while (pthread_mutex_lock(&(sock->recv_lock)) != 0);
+  printf("[DEBUG] [cmu_read] get recv_lock\n");
 
-  switch(flags){
+  switch (flags) {
     case NO_FLAG:
-      while(sock->received_len == 0){
+      while (sock->received_len == 0) {
+        printf("[DEBUG] [cmu_read] recieve_len=0, release lock, waiting for signal\n");
         pthread_cond_wait(&(sock->wait_cond), &(sock->recv_lock)); 
+        printf("[DEBUG] [cmu_read] get signal and lock, recieve_len=%d\n", sock->received_len);
       }
+      printf("[DEBUG] [cmu_read] start read from socket fd, enter NO_WAIT\n");
     case NO_WAIT:
-      if(sock->received_len > 0){
-        if(sock->received_len > length)
+      if (sock->received_len > 0) {
+        if (sock->received_len > length)
           read_len = length;
         else
           read_len = sock->received_len;
 
         memcpy(dst, sock->received_buf, read_len);
-        if(read_len < sock->received_len){
-           new_buf = malloc(sock->received_len - read_len);
-           memcpy(new_buf, sock->received_buf + read_len, 
-            sock->received_len - read_len);
-           free(sock->received_buf);
-           sock->received_len -= read_len;
-           sock->received_buf = new_buf;
+
+        if (read_len < sock->received_len) {
+          new_buf = malloc(sock->received_len - read_len);
+          memcpy(new_buf, sock->received_buf+read_len, sock->received_len-read_len);
+          free(sock->received_buf);
+          sock->received_len -= read_len;
+          sock->received_buf = new_buf;
         }
-        else{
+        else {
           free(sock->received_buf);
           sock->received_buf = NULL;
           sock->received_len = 0;
@@ -177,7 +239,7 @@ int cmu_read(cmu_socket_t * sock, char* dst, int length, int flags){
       }
       break;
     default:
-      perror("ERROR Unknown flag.\n");
+      perror("[ERROR] Unknown flag");
       read_len = EXIT_ERROR;
   }
   pthread_mutex_unlock(&(sock->recv_lock));
@@ -195,13 +257,13 @@ int cmu_read(cmu_socket_t * sock, char* dst, int length, int flags){
  *  error information is returned. 
  *
  */
-int cmu_write(cmu_socket_t * sock, char* src, int length){
+int cmu_write(cmu_socket_t* sock, char* src, int length) {
   while(pthread_mutex_lock(&(sock->send_lock)) != 0);
   if(sock->sending_buf == NULL)
-    sock->sending_buf = malloc(length);
+    sock->sending_buf = calloc(length, 1);
   else
-    sock->sending_buf = realloc(sock->sending_buf, length + sock->sending_len);
-  memcpy(sock->sending_buf + sock->sending_len, src, length);
+    sock->sending_buf = realloc(sock->sending_buf, length+sock->sending_len);
+  memcpy(sock->sending_buf+sock->sending_len, src, length);
   sock->sending_len += length;
 
   pthread_mutex_unlock(&(sock->send_lock));

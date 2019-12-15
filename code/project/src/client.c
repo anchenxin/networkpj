@@ -12,14 +12,22 @@ void functionality(cmu_socket_t  * sock){
     int read;
     FILE *fp;
 
+    printf("[DEBUG] client start writing data to socket.\n");
+    printf("[DEBUG] write \"hi there\"\n");
     cmu_write(sock, "hi there", 9);
+    printf("[DEBUG] write \"hi there2\"\n");
     cmu_write(sock, "hi there2", 10);
+    printf("[DEBUG] write \"hi there3\"\n");
     cmu_write(sock, "hi there3", 10);
+    printf("[DEBUG] write \"hi there4\"\n");
     cmu_write(sock, "hi there4", 10);
+    printf("[DEBUG] write \"hi there5\"\n");
     cmu_write(sock, "hi there5", 10);
+    printf("[DEBUG] write \"hi there6\"\n");
     cmu_write(sock, "hi there6", 10);
     cmu_read(sock, buf, 200, NO_FLAG);
 
+    printf("[DEBUG] write \"hi there\"\n");
     cmu_write(sock, "hi there", 9);
     cmu_read(sock, buf, 200, NO_FLAG);
     printf("R: %s\n", buf);
@@ -34,7 +42,40 @@ void functionality(cmu_socket_t  * sock){
         if(read > 0)
             cmu_write(sock, buf, read);
     }
-    
+    // char buf[9898];
+    // // FILE *file_for_write;
+    // FILE *file_for_read;
+    // // int n;
+    // // n = 1;
+    // int read = 1;
+    // int total = 0;
+    // file_for_read = fopen("./test/random.input","rb");
+    // puts("123");
+    // fseek(file_for_read,0,SEEK_END);
+    // long len = ftell(file_for_read);
+    // fseek(file_for_read,0,SEEK_SET);
+    // cmu_write(sock,(char*) &len,8);
+    // while(read > 0 ){
+    //     read = fread(buf, 1, 2000, file_for_read);
+    //     total = total + read;
+    //     printf("read from file  is %d total = %d len = %d\n", read, total, (int)len);
+    //     if(read > 0)
+    //         cmu_write(sock, buf, read);
+    // }
+    // printf("read total = %d\n", total);
+    // close((int)file_for_read);
+    // total = 0;
+    // int len2;
+    // cmu_read(sock,&len2,4,NO_FLAG);
+    // file_for_write = fopen("./test/f2.txt", "w+");
+    // while(total  < len2 && n != 0){
+    //     n = cmu_read(sock, buf, 2000, NO_FLAG);
+    //     total = total + n;
+    //     //printf("n = %d,total = %d\n", n,total);
+    //     fwrite(buf, 1, n, file_for_write);
+    // }
+    // printf("get total = %d\n", total);
+    // close(file_for_write);
 }
 
 /*
@@ -67,7 +108,7 @@ int main(int argc, char **argv) {
 
     if(cmu_socket(&socket, TCP_INITATOR, portno, serverip) < 0)
         exit(EXIT_FAILURE);
-    
+
     functionality(&socket);
 
     if(cmu_close(&socket) < 0)
